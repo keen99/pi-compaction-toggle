@@ -20,7 +20,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -47,10 +47,21 @@ function saveBlocked(blocked: boolean): void {
 
 export default function (pi: ExtensionAPI) {
 	let blocked = loadBlocked();
+	try {
+		mkdirSync(STATE_DIR, { recursive: true });
+		appendFileSync(join(STATE_DIR, "debug.log"), `${new Date().toISOString()} loaded blocked=${blocked}\n`);
+	} catch {
+		/* best-effort */
+	}
 
 	pi.registerCommand("compact-toggle", {
 		description: "Toggle compaction blocking (live, no restart). Args: on|off|status",
 		handler: (args, ctx) => {
+		try {
+			appendFileSync(join(STATE_DIR, "debug.log"), `${new Date().toISOString()} handler args="${args}" blocked_in=${blocked}\n`);
+		} catch {
+			/* best-effort */
+		}
 			const arg = (args ?? "").trim().toLowerCase();
 			if (arg === "on" || arg === "block") {
 				blocked = true;

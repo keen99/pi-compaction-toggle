@@ -4,7 +4,9 @@
 	"description": "Live toggle for pi auto-compaction: /compact-toggle blocks (and unblocks) compaction without restarting pi",
 	"license": "MIT",
 	"pi": {
-		"extensions": ["./index.ts"]
+		"extensions": [
+			"./index.ts"
+		]
 	},
 	"peerDependencies": {
 		"@earendil-works/pi-coding-agent": "*"
@@ -13,5 +15,6 @@
 		"@earendil-works/pi-coding-agent": {
 			"optional": true
 		}
-	}
+	},
+	"type": "module"
 }
