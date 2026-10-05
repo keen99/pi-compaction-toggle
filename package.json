@@ -1,20 +1,27 @@
 {
-	"name": "pi-compaction-toggle",
-	"version": "1.0.0",
-	"description": "Live toggle for pi auto-compaction: /compact-toggle blocks (and unblocks) compaction without restarting pi",
-	"license": "MIT",
-	"pi": {
-		"extensions": [
-			"./index.ts"
-		]
-	},
-	"peerDependencies": {
-		"@earendil-works/pi-coding-agent": "*"
-	},
-	"peerDependenciesMeta": {
-		"@earendil-works/pi-coding-agent": {
-			"optional": true
-		}
-	},
-	"type": "module"
+  "name": "pi-compaction-toggle",
+  "version": "1.0.0",
+  "description": "Live toggle for pi auto-compaction: /compact-toggle blocks (and unblocks) compaction without restarting pi",
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "type": "module",
+  "devDependencies": {
+    "tsx": "^4.23.15"
+  },
+  "scripts": {
+    "test": "node --import tsx --test test/unit.test.ts",
+    "test:matrix": "node test/release-matrix.mjs"
+  }
 }

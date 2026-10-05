@@ -24,57 +24,72 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const STATE_DIR = join(homedir(), ".pi", "agent", "pi-compaction-toggle");
-const STATE_FILE = join(STATE_DIR, "state.json");
+/** State dir per call: PI_CODING_AGENT_DIR wins so tests/alt installs never
+ *  touch the real ~/.pi/agent. */
+function stateDir(): string {
+	return join(
+		process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
+		"pi-compaction-toggle",
+	);
+}
+function stateFile(): string {
+	return join(stateDir(), "state.json");
+}
 
-function loadBlocked(): boolean {
+export function loadBlocked(): boolean {
 	try {
-		const raw = JSON.parse(readFileSync(STATE_FILE, "utf8"));
+		const raw = JSON.parse(readFileSync(stateFile(), "utf8"));
 		return raw.blocked === true;
 	} catch {
 		return false;
 	}
 }
 
-function saveBlocked(blocked: boolean): void {
+export function saveBlocked(blocked: boolean): void {
 	try {
-		mkdirSync(dirname(STATE_FILE), { recursive: true });
-		writeFileSync(STATE_FILE, JSON.stringify({ blocked }, null, "\t") + "\n");
+		mkdirSync(dirname(stateFile()), { recursive: true });
+		writeFileSync(stateFile(), JSON.stringify({ blocked }, null, "\t") + "\n");
 	} catch {
 		/* best-effort; in-memory state still applies this session */
 	}
 }
 
-export default function (pi: ExtensionAPI) {
-	let blocked = loadBlocked();
+/** Pure arg parsing for /compact-toggle. Returns the next blocked state, or
+ *  undefined when the arg is a status query. Unknown args flip. */
+export function nextBlocked(current: boolean, rawArgs: string | undefined): { blocked: boolean; statusOnly: boolean } {
+	const arg = (rawArgs ?? "").trim().toLowerCase();
+	if (arg === "on" || arg === "block") return { blocked: true, statusOnly: false };
+	if (arg === "off" || arg === "unblock") return { blocked: false, statusOnly: false };
+	if (arg === "status" || arg === "") return { blocked: current, statusOnly: true };
+	return { blocked: !current, statusOnly: false };
+}
+
+function debugMarker(data: Record<string, unknown>): void {
+	if (process.env.COMPACTION_TOGGLE_DEBUG !== "1") return;
 	try {
-		mkdirSync(STATE_DIR, { recursive: true });
-		appendFileSync(join(STATE_DIR, "debug.log"), `${new Date().toISOString()} loaded blocked=${blocked}\n`);
+		const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+		mkdirSync(agentDir, { recursive: true });
+		appendFileSync(join(agentDir, "compaction-toggle-loaded.json"), JSON.stringify(data) + "\n");
 	} catch {
 		/* best-effort */
 	}
+}
+
+export default function (pi: ExtensionAPI) {
+	let blocked = loadBlocked();
+	debugMarker({ loaded: true, blocked });
 
 	pi.registerCommand("compact-toggle", {
 		description: "Toggle compaction blocking (live, no restart). Args: on|off|status",
 		handler: (args, ctx) => {
-		try {
-			appendFileSync(join(STATE_DIR, "debug.log"), `${new Date().toISOString()} handler args="${args}" blocked_in=${blocked}\n`);
-		} catch {
-			/* best-effort */
-		}
-			const arg = (args ?? "").trim().toLowerCase();
-			if (arg === "on" || arg === "block") {
-				blocked = true;
-			} else if (arg === "off" || arg === "unblock") {
-				blocked = false;
-			} else if (arg === "status" || arg === "") {
+			const next = nextBlocked(blocked, args);
+			blocked = next.blocked;
+			if (next.statusOnly) {
 				ctx.ui.notify(
 					`compaction: ${blocked ? "BLOCKED (toggle on to allow)" : "allowed"}`,
 					"info",
 				);
 				return;
-			} else {
-				blocked = !blocked;
 			}
 			saveBlocked(blocked);
 			ctx.ui.notify(
