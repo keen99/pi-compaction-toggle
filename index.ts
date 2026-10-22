@@ -6,56 +6,32 @@
  * while you watch). This extension blocks compaction via the
  * session_before_compact event hook, toggleable without restarting pi.
  *
+ * State is PER-SESSION by construction: it lives in the session file itself
+ * via pi.appendEntry (same pattern as pi-model-lock / pi-git-safe-write).
+ * One session flipping its toggle can NEVER affect another — there is no
+ * shared/global store at all. Restored on session_start by replaying the
+ * session's own entries (last one wins), so it survives /reload and restart
+ * of the same session, and resets naturally on /new and /fork.
+ *
  * Note: the event fires for manual /compact too (no auto/manual
- * discriminator), so while blocked, run /compact-toggle to unblock before
+ * discriminator), so while blocked, run /compact-toggle off before
  * compacting manually.
  *
  * Usage:
- *   /compact-toggle          — flip block state
- *   /compact-toggle on|off   — set explicitly
+ *   /compact-toggle          — flip block state (this session)
+ *   /compact-toggle on|off   — set explicitly (this session)
  *   /compact-toggle status   — show state (default when no arg)
- *
- * State persists to ~/.pi/agent/pi-compaction-toggle/state.json and
- * survives reloads/restarts.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-/** State dir per call: PI_CODING_AGENT_DIR wins so tests/alt installs never
- *  touch the real ~/.pi/agent. */
-function stateDir(): string {
-	return join(
-		process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"),
-		"pi-compaction-toggle",
-	);
-}
-function stateFile(): string {
-	return join(stateDir(), "state.json");
-}
-
-export function loadBlocked(): boolean {
-	try {
-		const raw = JSON.parse(readFileSync(stateFile(), "utf8"));
-		return raw.blocked === true;
-	} catch {
-		return false;
-	}
-}
-
-export function saveBlocked(blocked: boolean): void {
-	try {
-		mkdirSync(dirname(stateFile()), { recursive: true });
-		writeFileSync(stateFile(), JSON.stringify({ blocked }, null, "\t") + "\n");
-	} catch {
-		/* best-effort; in-memory state still applies this session */
-	}
-}
+const ENTRY_KEY = "compaction-toggle";
 
 /** Pure arg parsing for /compact-toggle. Returns the next blocked state, or
- *  undefined when the arg is a status query. Unknown args flip. */
+ *  a statusOnly flag when the arg is a status query. Unknown args flip. */
 export function nextBlocked(current: boolean, rawArgs: string | undefined): { blocked: boolean; statusOnly: boolean } {
 	const arg = (rawArgs ?? "").trim().toLowerCase();
 	if (arg === "on" || arg === "block") return { blocked: true, statusOnly: false };
@@ -76,27 +52,37 @@ function debugMarker(data: Record<string, unknown>): void {
 }
 
 export default function (pi: ExtensionAPI) {
-	let blocked = loadBlocked();
-	debugMarker({ loaded: true, blocked });
+	// In-memory mirror of the session's own state. Source of truth = the
+	// session file's custom entries; this flips only from restore or toggle.
+	let blocked = false;
+	debugMarker({ loaded: true });
+
+	pi.on("session_start", async (_event, ctx) => {
+		for (const entry of ctx.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== ENTRY_KEY) continue;
+			blocked = (entry.data as { blocked?: boolean })?.blocked === true;
+		}
+		debugMarker({ restored: true, blocked });
+	});
 
 	pi.registerCommand("compact-toggle", {
-		description: "Toggle compaction blocking (live, no restart). Args: on|off|status",
+		description: "Toggle compaction blocking for THIS session (live, no restart). Args: on|off|status",
 		handler: (args, ctx) => {
 			const next = nextBlocked(blocked, args);
-			blocked = next.blocked;
 			if (next.statusOnly) {
 				ctx.ui.notify(
-					`compaction: ${blocked ? "BLOCKED (toggle on to allow)" : "allowed"}`,
+					`compaction (this session): ${next.blocked ? "BLOCKED (toggle off to allow)" : "allowed"}`,
 					"info",
 				);
 				return;
 			}
-			saveBlocked(blocked);
+			blocked = next.blocked;
+			pi.appendEntry(ENTRY_KEY, { blocked: next.blocked });
 			ctx.ui.notify(
-				blocked
-					? "compaction BLOCKED — auto-compact will not run. /compact-toggle off to re-enable"
-					: "compaction allowed",
-				blocked ? "warning" : "info",
+				next.blocked
+					? "compaction BLOCKED for this session — auto-compact will not run. /compact-toggle off to re-enable"
+					: "compaction allowed for this session",
+				next.blocked ? "warning" : "info",
 			);
 		},
 	});
@@ -104,7 +90,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_before_compact", (_event, ctx) => {
 		if (!blocked) return undefined;
 		ctx?.ui?.notify?.(
-			"compaction blocked by /compact-toggle — context not compacted",
+			"compaction blocked by /compact-toggle (this session) — context not compacted",
 			"warning",
 		);
 		return { cancel: true };
