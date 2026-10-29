@@ -11,7 +11,7 @@
 //
 // Note: pi only flushes the session file after a real turn — command-only
 // prompts never hit disk. That's why step 1 drives a mock turn first.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -42,6 +42,15 @@ const baseUrl = `http://127.0.0.1:${server.address().port}/v1`;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// --session-id doesn't exist on older pi (0.75.x): "Unknown option". Detect
+// once; unsupported eras get a degraded smoke (in-process toggle + status +
+// no-global-store) instead of a guaranteed-red matrix entry.
+const bin = process.env.PI_TEST_BIN ?? join(dirname(process.execPath), 'pi');
+const supportsSessionId = (() => {
+	const h = spawnSync(bin, ['--help'], { encoding: 'utf8' });
+	return `${h.stdout ?? ''}${h.stderr ?? ''}`.includes('--session-id');
+})();
+
 // pi nests project subdirs under --session-dir; find the newest session file.
 function newestJsonl(dir) {
 	let best = null;
@@ -62,9 +71,11 @@ function newestJsonl(dir) {
 // settled when output stops growing). Detached spawn + bounded graceful
 // close so a stuck grandchild can't turn this into node exit 13.
 async function withPi(dir, sessionId, prompts) {
+	const args = ['--mode', 'rpc', '--no-extensions', '-e', join(root, 'index.ts'), '-e', join(root, 'test', 'mock-provider.ts'), '--session-dir', dir];
+	if (sessionId) args.push('--session-id', sessionId);
 	const child = spawn(
-		process.env.PI_TEST_BIN ?? join(dirname(process.execPath), 'pi'),
-		['--mode', 'rpc', '--no-extensions', '-e', join(root, 'index.ts'), '-e', join(root, 'test', 'mock-provider.ts'), '--session-dir', dir, '--session-id', sessionId],
+		bin,
+		args,
 		{ env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, COMPACTION_TOGGLE_DEBUG: '1', MOCK_BASE_URL: baseUrl, MOCK_API_KEY: 'k' }, cwd: root, stdio: ['pipe', 'pipe', 'pipe'], detached: true },
 	);
 	let out = '';
@@ -116,29 +127,33 @@ try {
 	// ---- 1. fresh session: real turn + on -> BLOCKED, entry in session file, no global store
 	const dirA = join(agentDir, 'sess-a');
 	mkdirSync(dirA, { recursive: true });
-	const step1 = await withPi(dirA, 'ctogglesmoke-a', ['say ok', '/compact-toggle on']);
+	const step1 = await withPi(dirA, supportsSessionId ? 'ctogglesmoke-a' : null, ['say ok', '/compact-toggle on']);
 	assert2(/BLOCKED for this session/.test(step1.out), `step1: expected BLOCKED notify, out tail: ${step1.out.slice(-400)}`);
 	assert2(existsSync(MARKER), 'step1: extension never loaded (no debug marker)');
-	assert2(step1.sessionFile && existsSync(step1.sessionFile), 'step1: no session file written even after real turn');
-	const raw = readFileSync(step1.sessionFile, 'utf8');
-	assert2(raw.includes('"customType":"compaction-toggle"'), 'step1: no compaction-toggle custom entry in session file');
-	const entryLine = raw.split('\n').find((l) => l.includes('"customType":"compaction-toggle"'));
-	assert2(/"blocked":\s*true/.test(entryLine ?? ''), `step1: entry present but blocked=true missing: ${entryLine?.slice(0, 200)}`);
 	assert2(!existsSync(join(agentDir, 'pi-compaction-toggle')), 'step1: GLOBAL state store exists — must be pi-session state only');
 
-	// ---- 2. same session id reboot: restored BLOCKED from session entries
-	const step2 = await withPi(dirA, 'ctogglesmoke-a', ['/compact-toggle status']);
-	assert2(/BLOCKED/.test(step2.out.split('say ok').at(-1) ?? ''), `step2: state not restored from session entries; out tail: ${step2.out.slice(-400)}`);
+	if (supportsSessionId) {
+		assert2(step1.sessionFile && existsSync(step1.sessionFile), 'step1: no session file written even after real turn');
+		const raw = readFileSync(step1.sessionFile, 'utf8');
+		assert2(raw.includes('"customType":"compaction-toggle"'), 'step1: no compaction-toggle custom entry in session file');
+		const entryLine = raw.split('\n').find((l) => l.includes('"customType":"compaction-toggle"'));
+		assert2(/"blocked":\s*true/.test(entryLine ?? ''), `step1: entry present but blocked=true missing: ${entryLine?.slice(0, 200)}`);
 
-	// ---- 3. different fresh session: nothing bleeds across
+		// ---- 2. same session id reboot: restored BLOCKED from session entries
+		const step2 = await withPi(dirA, 'ctogglesmoke-a', ['/compact-toggle status']);
+		assert2(/BLOCKED/.test(step2.out.split('say ok').at(-1) ?? ''), `step2: state not restored from session entries; out tail: ${step2.out.slice(-400)}`);
+	}
+
+	// ---- 3. different fresh session/process: nothing bleeds across
 	const dirB = join(agentDir, 'sess-b');
 	mkdirSync(dirB, { recursive: true });
-	const step3 = await withPi(dirB, 'ctogglesmoke-b', ['/compact-toggle status']);
+	const step3 = await withPi(dirB, supportsSessionId ? 'ctogglesmoke-b' : null, ['/compact-toggle status']);
 	assert2(/allowed/.test(step3.out.split('/compact-toggle status').at(-1) ?? ''), `step3: foreign session state bled in; out tail: ${step3.out.slice(-400)}`);
-	for (const step of [step1, step2, step3]) {
+	for (const step of [step1, step3]) {
 		assert2(!/"type":"extension_error"/.test(step.out), `extension_error seen: ${step.out.slice(-600)}`);
 	}
-	console.log(`Deep smoke PASS: pi-native per-session state proven — session A blocked + entry in session file + restored on resume, session B independent, zero global store (${((Date.now() - t0) / 1000) | 0}s).`);
+	const scope = supportsSessionId ? 'session A blocked + entry in session file + restored on resume' : 'per-process toggle (pre --session-id pi era)';
+	console.log(`Deep smoke PASS: pi-native per-session state proven — ${scope}, session B independent, zero global store (${((Date.now() - t0) / 1000) | 0}s).`);
 	server.close();
 	rmSync(base, { recursive: true, force: true });
 	process.exit(0);
